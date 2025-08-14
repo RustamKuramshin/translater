@@ -19,4 +19,4 @@ fi
 
 # Fallback to running the local script directly
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-exec python3 "${SCRIPT_DIR}/translater.py" "$@"
+exec python3 "${SCRIPT_DIR}/translater.py" --input hands-high-performance-spring-5.pdf --output out.md --config config.yaml --page-end 10
