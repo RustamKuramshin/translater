@@ -33,7 +33,6 @@ import hashlib
 import json
 import logging
 import os
-import signal
 import sqlite3
 import sys
 import textwrap
@@ -505,15 +504,6 @@ def main(argv: Optional[List[str]] = None) -> int:
     db_path = Path(cfg.runtime.db_path).expanduser().resolve()
     db = StateDB(db_path)
 
-    # Graceful shutdown on Ctrl+C
-    stop_flag = {"stop": False}
-
-    def handle_sigint(signum, frame):  # type: ignore
-        logger.warning("Interrupted by user. Will stop after current chunk.")
-        stop_flag["stop"] = True
-
-    signal.signal(signal.SIGINT, handle_sigint)
-
     # Load & split
     logger.info("Loading and chunking PDF...")
     try:
@@ -546,8 +536,6 @@ def main(argv: Optional[List[str]] = None) -> int:
     # Process chunks
     start_time = time.time()
     for ch in chunks:
-        if stop_flag["stop"]:
-            break
         if ch.chunk_id in completed_ids and cfg.runtime.resume:
             continue
 
