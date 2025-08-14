@@ -1,9 +1,9 @@
 # Translater (LangChain + OpenAI)
 
-## Translate PDFs to Russian Markdown with AI
+## Translate PDFs to Markdown in your target language with AI
 
 A Python-based document and text translator powered by LangChain and OpenAI.
-This tool automatically extracts text from PDFs, intelligently splits it into chunks, translates it into Russian while preserving structure, and returns clean, well-formatted Markdown.
+This tool automatically extracts text from PDFs, intelligently splits it into chunks, translates it into your chosen target language while preserving structure, and returns clean, well-formatted Markdown.
 It supports session resumption, page range selection, customizable LLM parameters, logging, and dry-run mode.
 
 * **Quick start** – works out of the box (just set your `OPENAI_API_KEY`)
@@ -34,7 +34,7 @@ It supports session resumption, page range selection, customizable LLM parameter
 
 ## What This Project Does
 
-This tool translates English PDF documents into Russian while preserving the original structure — including headings, lists, code blocks, tables, and formatting.
+This tool translates English PDF documents into your target language while preserving the original structure — including headings, lists, code blocks, tables, and formatting.
 The result is delivered in Markdown, making it ideal for publications, documentation, and technical articles.
 
 Under the hood, it uses **LangChain** for loading and splitting text, and **OpenAI** (via `langchain-openai`) for high-quality machine translation. Large files are split into overlapping chunks to reduce sentence-boundary translation errors.
@@ -43,7 +43,7 @@ Under the hood, it uses **LangChain** for loading and splitting text, and **Open
 
 ## Features
 
-* Translate **PDF → Russian Markdown** (no summaries, no omissions)
+* Translate **PDF → Markdown** in a configurable target language — no summaries, no omissions
 * Preserve formatting:
 
   * headings, lists, numbered lists
@@ -126,7 +126,7 @@ export OPENAI_API_KEY=sk-...
 Or directly via Python:
 
 ```bash
-python3 translater.py --input input.pdf --output output.ru.md --config config.yaml
+python3 translater.py --input input.pdf --output output.ru.md --config config.yaml --target-lang ru
 ```
 
 Note: `run.sh` tries to use the installed CLI command `pdf-translater` (if in PATH), otherwise runs `translater.py`. The main method in this repo is direct execution of `translater.py`.
@@ -150,14 +150,15 @@ split:
   chunk_size: 2000
   chunk_overlap: 200
 runtime:
-  output: null
+  target_lang: ru           # target language (code or name)
+  output: null              # default output: <input>.<lang>.md
   db_path: ./.translator_state.sqlite3
   resume: true
   max_retries: 3
   retry_backoff: 2.0
   dry_run: false
-  page_start: null
-  page_end: null
+  page_start: null          # 1-based inclusive
+  page_end: null            # if only page_end set, translates first N pages
 ```
 
 Any CLI parameter overrides the configuration file.
@@ -171,7 +172,13 @@ Any CLI parameter overrides the configuration file.
   ```bash
   python3 translater.py --input doc.pdf
   ```
-* Specify output file:
+* Translate to Spanish with default-named output file:
+
+  ```bash
+  python3 translater.py --input doc.pdf --target-lang es
+  # output defaults to doc.es.md
+  ```
+* Specify output file explicitly:
 
   ```bash
   python3 translater.py --input doc.pdf --output doc.ru.md
@@ -196,10 +203,10 @@ Any CLI parameter overrides the configuration file.
   ```bash
   python3 translater.py --input doc.pdf --dry-run
   ```
-* Fine-tune LLM parameters:
+* Fine-tune LLM parameters and language:
 
   ```bash
-  python3 translater.py --input doc.pdf --model gpt-4o-mini --temperature 0.2 --request-timeout 180
+  python3 translater.py --input doc.pdf --model gpt-4o-mini --temperature 0.2 --request-timeout 180 --target-lang fr
   ```
 
 ---

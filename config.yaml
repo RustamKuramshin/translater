@@ -22,7 +22,9 @@ split:
   chunk_overlap: 200
 
 runtime:
-  # Path to output Markdown. If null, tool uses <input>.ru.md
+  # Target language (code or name).
+  target_lang: ru
+  # Path to output Markdown. If null, tool uses <input>.<lang>.md
   output: null
   # Path to SQLite DB used for resumable progress. Can be a relative path.
   db_path: ./.translator_state.sqlite3

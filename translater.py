@@ -2,7 +2,7 @@
 """
 AI PDF Translator CLI
 
-Translates English PDF documents to Russian using OpenAI Chat Completions via LangChain.
+Translates English PDF documents to a configurable target language using OpenAI Chat Completions via LangChain.
 
 Key features:
 - CLI with config file support (YAML or JSON). CLI args override config.
@@ -96,6 +96,8 @@ class RuntimeConfig:
     # Page range (1-based inclusive). If only page_end is set, translates first N pages.
     page_start: Optional[int] = None
     page_end: Optional[int] = None
+    # Target language for translation (language code or name).
+    target_lang: str = "ru"
 
 
 @dataclass
@@ -132,6 +134,9 @@ class AppConfig:
             cfg.runtime.page_start = args.page_start
         if getattr(args, 'page_end', None) is not None:
             cfg.runtime.page_end = args.page_end
+        # Target language override
+        if getattr(args, 'target_lang', None):
+            cfg.runtime.target_lang = args.target_lang
         # LLM overrides
         if args.model:
             cfg.llm.model = args.model
@@ -467,17 +472,62 @@ def load_and_chunk_pdf(pdf_path: Path, split_cfg: SplitConfig, page_start: Optio
 
 
 # ---------------------- LLM Prompt & Translation ----------------------
-SYSTEM_PROMPT = (
-    "You are a professional English-to-Russian translator. Your goal is to translate technical and general texts with high fidelity, preserving the meaning, tone, and structure.\n"
-    "Rules:\n"
-    "- Translate from English to Russian. Do not summarize or omit any content. Do not add extra explanations.\n"
-    "- Preserve lists, numbered steps, headings, and code blocks. Convert structure to clean Markdown.\n"
-    "- Keep tables readable in Markdown if possible.\n"
-    "- Preserve inline formatting: bold (**), italics (*), inline code (`), links [text](url).\n"
-    "- Keep numbers, units, dates consistent; localize where appropriate but do not distort meaning.\n"
-    "- If a sentence is incomplete due to chunking, translate it naturally and continue; do not repeat previous content.\n"
-    "Output: Return only the translated text in Russian as valid Markdown, without any preface or notes."
-)
+
+def _normalize_lang(lang: str) -> tuple[str, str]:
+    """
+    Returns (code, display_name).
+    Accepts codes like 'ru', 'en-US' or names like 'English'.
+    """
+    if not lang:
+        return ("ru", "Russian")
+    s = str(lang).strip()
+    lower = s.lower()
+    # Common mappings
+    mapping = {
+        "ru": ("ru", "Russian"),
+        "russian": ("ru", "Russian"),
+        "en": ("en", "English"),
+        "english": ("en", "English"),
+        "es": ("es", "Spanish"),
+        "spanish": ("es", "Spanish"),
+        "fr": ("fr", "French"),
+        "french": ("fr", "French"),
+        "de": ("de", "German"),
+        "german": ("de", "German"),
+        "it": ("it", "Italian"),
+        "italian": ("it", "Italian"),
+        "pt": ("pt", "Portuguese"),
+        "portuguese": ("pt", "Portuguese"),
+        "zh": ("zh", "Chinese"),
+        "chinese": ("zh", "Chinese"),
+        "ja": ("ja", "Japanese"),
+        "japanese": ("ja", "Japanese"),
+    }
+    if lower in mapping:
+        return mapping[lower]
+    # Handle regional codes like en-us
+    if len(lower) <= 5 and all(c.isalpha() or c in {'-', '_'} for c in lower):
+        code = lower.split('-', 1)[0].split('_', 1)[0]
+        # Title-case as a fallback name
+        name = s.strip().capitalize()
+        return (code, name)
+    # Fallback: no code, just name
+    return ("xx", s)
+
+
+def build_system_prompt(target_lang: str) -> str:
+    code, name = _normalize_lang(target_lang)
+    return (
+        f"You are a professional English-to-{name} translator. Your goal is to translate technical and general texts with high fidelity, preserving the meaning, tone, and structure.\n"
+        "Rules:\n"
+        f"- Translate from English to {name}. Do not summarize or omit any content. Do not add extra explanations.\n"
+        "- Preserve lists, numbered steps, headings, and code blocks. Convert structure to clean Markdown.\n"
+        "- Keep tables readable in Markdown if possible.\n"
+        "- Preserve inline formatting: bold (**), italics (*), inline code (`), links [text](url).\n"
+        "- Keep numbers, units, dates consistent; localize where appropriate but do not distort meaning.\n"
+        "- If a sentence is incomplete due to chunking, translate it naturally and continue; do not repeat previous content.\n"
+        f"Output: Return only the translated text in {name} as valid Markdown, without any preface or notes."
+    )
 
 
 def ensure_openai_env():
@@ -503,13 +553,15 @@ def build_llm(cfg: LLMConfig) -> ChatOpenAI:
     return client
 
 
-def translate_chunk(llm: ChatOpenAI, text: str, max_retries: int, backoff: float) -> str:
+def translate_chunk(llm: ChatOpenAI, text: str, max_retries: int, backoff: float, target_lang: str) -> str:
     last_err: Optional[Exception] = None
+    sys_prompt = build_system_prompt(target_lang)
+    _, lang_name = _normalize_lang(target_lang)
     for attempt in range(1, max_retries + 1):
         try:
             messages = [
-                SystemMessage(content=SYSTEM_PROMPT),
-                HumanMessage(content=f"Translate the following content to Russian. Return only Markdown.\n\n{text}"),
+                SystemMessage(content=sys_prompt),
+                HumanMessage(content=f"Translate the following content to {lang_name}. Return only Markdown.\n\n{text}"),
             ]
             logger.info(f"LLM request start (attempt {attempt}/{max_retries}) | input chars: {len(text)}")
             t0 = time.perf_counter()
@@ -543,8 +595,21 @@ def translate_chunk(llm: ChatOpenAI, text: str, max_retries: int, backoff: float
 
 # ---------------------- Assembly ----------------------
 
-def assemble_markdown(chunks_data: List[Tuple[int, Optional[int], str]]) -> str:
+def assemble_markdown(chunks_data: List[Tuple[int, Optional[int], str]], target_lang: str) -> str:
     # chunks_data: list of (chunk_id, page, translated_md) sorted by chunk_id
+    code, name = _normalize_lang(target_lang)
+    label_map = {
+        "ru": "Страница",
+        "en": "Page",
+        "es": "Página",
+        "fr": "Page",
+        "de": "Seite",
+        "it": "Pagina",
+        "pt": "Página",
+        "zh": "页面",
+        "ja": "ページ",
+    }
+    label = label_map.get(code, "Page")
     out_lines: List[str] = []
     current_page: Optional[int] = None
     for _, page, md in chunks_data:
@@ -552,7 +617,7 @@ def assemble_markdown(chunks_data: List[Tuple[int, Optional[int], str]]) -> str:
         if page is not None and page != current_page:
             if out_lines:
                 out_lines.append("")
-            out_lines.append(f"\n\n---\n\n# Страница {page + 1}\n")
+            out_lines.append(f"\n\n---\n\n# {label} {page + 1}\n")
             current_page = page
         out_lines.append(md.rstrip())
         out_lines.append("")
@@ -564,10 +629,10 @@ def assemble_markdown(chunks_data: List[Tuple[int, Optional[int], str]]) -> str:
 def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="pdf-translator",
-        description="Translate English PDF to Russian Markdown using OpenAI via LangChain.",
+        description="Translate English PDF to a target language Markdown using OpenAI via LangChain.",
     )
     p.add_argument("--input", required=True, help="Path to input PDF file")
-    p.add_argument("--output", help="Path to output Markdown file. Default: <input>.ru.md")
+    p.add_argument("--output", help="Path to output Markdown file. Default: <input>.<lang>.md (lang from --target-lang)")
     p.add_argument("--config", help="Path to config file (YAML or JSON)")
 
     # LLM params
@@ -595,6 +660,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-retries", type=int, help="Max retries for LLM calls")
     p.add_argument("--retry-backoff", type=float, help="Initial backoff (s) for retries")
     p.add_argument("--dry-run", action="store_true", help="Load and split PDF, but do not call LLM")
+    p.add_argument("--target-lang", dest="target_lang", help="Target language (code or name), e.g., ru, en, es, 'Russian', 'Spanish'. Default from config: runtime.target_lang")
 
     return p
 
@@ -616,7 +682,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     if input_path.suffix.lower() != ".pdf":
         logger.warning("Input is not a .pdf file. Proceeding anyway, but PDF loader expects PDF.")
 
-    output_path = Path(cfg.runtime.output) if cfg.runtime.output else input_path.with_suffix(".ru.md")
+    # Determine output path: default suffix depends on target language code
+    def _lang_suffix(lang: str) -> str:
+        code, _ = _normalize_lang(lang)
+        # Limit to alphanum short code for filenames
+        if code and code != "xx":
+            return f".{code}.md"
+        return ".translated.md"
+    output_path = Path(cfg.runtime.output) if cfg.runtime.output else input_path.with_suffix(_lang_suffix(cfg.runtime.target_lang))
     output_path = output_path.expanduser().resolve()
 
     db_path = Path(cfg.runtime.db_path).expanduser().resolve()
@@ -638,9 +711,16 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     # Compute job id (file hash + page range) for state separation
     base_hash = file_content_sha256(input_path)
+    # Compose a job hash suffix for page range and target language
+    job_parts = []
     if cfg.runtime.page_start is not None or cfg.runtime.page_end is not None:
         page_spec = f"pages={cfg.runtime.page_start if cfg.runtime.page_start is not None else ''}:{cfg.runtime.page_end if cfg.runtime.page_end is not None else ''}"
-        file_hash = hashlib.sha256((base_hash + '|' + page_spec).encode('utf-8')).hexdigest()
+        job_parts.append(page_spec)
+    # Always include language to separate jobs by target language
+    lang_code, _ = _normalize_lang(cfg.runtime.target_lang)
+    job_parts.append(f"lang={lang_code}")
+    if job_parts:
+        file_hash = hashlib.sha256((base_hash + '|' + '|'.join(job_parts)).encode('utf-8')).hexdigest()
     else:
         file_hash = base_hash
 
@@ -677,7 +757,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             if cfg.runtime.dry_run:
                 translated = f"[DRY-RUN] {ch.text[:100]}..."
             else:
-                translated = translate_chunk(llm, ch.text, cfg.runtime.max_retries, cfg.runtime.retry_backoff)
+                translated = translate_chunk(llm, ch.text, cfg.runtime.max_retries, cfg.runtime.retry_backoff, cfg.runtime.target_lang)
             db.upsert_chunk(file_hash, ch.chunk_id, total_chunks, ch.page, "done", translated)
             # Update progress after successful translation
             processed_done += 1
@@ -691,7 +771,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         # After each chunk, assemble current output for safety
         try:
             translated_chunks = db.fetch_all_translations(file_hash)
-            md = assemble_markdown(translated_chunks)
+            md = assemble_markdown(translated_chunks, cfg.runtime.target_lang)
             output_path.parent.mkdir(parents=True, exist_ok=True)
             with output_path.open("w", encoding="utf-8") as f:
                 f.write(md)
@@ -709,7 +789,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     # Final assembly
     translated_chunks = db.fetch_all_translations(file_hash)
     if translated_chunks:
-        md = assemble_markdown(translated_chunks)
+        md = assemble_markdown(translated_chunks, cfg.runtime.target_lang)
         try:
             output_path.parent.mkdir(parents=True, exist_ok=True)
             with output_path.open("w", encoding="utf-8") as f:
