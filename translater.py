@@ -35,11 +35,10 @@ import logging
 import os
 import sqlite3
 import sys
-import textwrap
 import time
 from dataclasses import dataclass, asdict, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 # Try importing YAML support if available
 try:
