@@ -333,3 +333,4 @@ cython_debug/
 .idea
 *.pdf
 *.sqlite3
+*.md

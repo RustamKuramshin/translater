@@ -93,6 +93,9 @@ class RuntimeConfig:
     max_retries: int = 3
     retry_backoff: float = 2.0
     dry_run: bool = False
+    # Page range (1-based inclusive). If only page_end is set, translates first N pages.
+    page_start: Optional[int] = None
+    page_end: Optional[int] = None
 
 
 @dataclass
@@ -124,6 +127,11 @@ class AppConfig:
             cfg.runtime.retry_backoff = args.retry_backoff
         if args.dry_run:
             cfg.runtime.dry_run = True
+        # Page range overrides
+        if getattr(args, 'page_start', None) is not None:
+            cfg.runtime.page_start = args.page_start
+        if getattr(args, 'page_end', None) is not None:
+            cfg.runtime.page_end = args.page_end
         # LLM overrides
         if args.model:
             cfg.llm.model = args.model
@@ -276,6 +284,41 @@ def file_content_sha256(path: Path) -> str:
     return h.hexdigest()
 
 
+def _format_eta(seconds: float) -> str:
+    # Format seconds into H:MM:SS
+    seconds = max(0, int(seconds))
+    h = seconds // 3600
+    m = (seconds % 3600) // 60
+    s = seconds % 60
+    if h > 0:
+        return f"{h}:{m:02d}:{s:02d}"
+    return f"{m:02d}:{s:02d}"
+
+
+def print_progress(done: int, total: int, start_time: float, prefix: str = "Progress") -> None:
+    """
+    Render a simple, dependency-free progress bar to stdout on a single line.
+    Shows percentage, bar, counts, and ETA.
+    """
+    total = max(total, 1)
+    done = min(max(done, 0), total)
+    elapsed = time.time() - start_time
+    rate = done / elapsed if elapsed > 0 else 0.0
+    remaining = total - done
+    eta = (remaining / rate) if rate > 0 else 0.0
+    width = 30
+    pct = done / total
+    filled = int(width * pct)
+    bar = "█" * filled + "-" * (width - filled)
+    msg = f"\r{prefix} |{bar}| {pct*100:5.1f}% ({done}/{total}) ETA { _format_eta(eta) }"
+    try:
+        sys.stdout.write(msg)
+        sys.stdout.flush()
+    except Exception:
+        # Fallback to logging if stdout write fails for some reason
+        logger.info(f"{prefix}: {done}/{total} ({pct*100:.1f}%)")
+
+
 # ---------------------- DB (Resumable) ----------------------
 class StateDB:
     def __init__(self, db_path: Path):
@@ -341,12 +384,35 @@ class Chunk:
     text: str
 
 
-def load_and_chunk_pdf(pdf_path: Path, split_cfg: SplitConfig) -> List[Chunk]:
+def load_and_chunk_pdf(pdf_path: Path, split_cfg: SplitConfig, page_start: Optional[int] = None, page_end: Optional[int] = None) -> List[Chunk]:
     if PyPDFLoader is None or RecursiveCharacterTextSplitter is None:
         raise RuntimeError("Required dependencies missing. Please install langchain, langchain-community, and pypdf.")
 
     loader = PyPDFLoader(str(pdf_path))
-    docs = loader.load()  # Each doc typically has page_content and metadata like {'page': i}
+
+    # Normalize page range (1-based inclusive to 0-based inclusive bounds)
+    start0: Optional[int] = None
+    end0: Optional[int] = None
+    if page_start is not None and page_start <= 0:
+        raise ValueError("--page-start must be >= 1")
+    if page_end is not None and page_end <= 0:
+        raise ValueError("--page-end must be >= 1")
+
+    if page_start is None and page_end is not None:
+        # First N pages: 1..page_end
+        start0, end0 = 0, page_end - 1
+    elif page_start is not None and page_end is None:
+        # From start to the end
+        start0, end0 = page_start - 1, None
+    elif page_start is not None and page_end is not None:
+        # Inclusive range
+        s0, e0 = page_start - 1, page_end - 1
+        if s0 > e0:
+            logger.warning(f"Page range start ({page_start}) > end ({page_end}), swapping.")
+            s0, e0 = e0, s0
+        start0, end0 = s0, e0
+    else:
+        start0, end0 = None, None
 
     # Heuristic separators to better preserve structure
     splitter = RecursiveCharacterTextSplitter(
@@ -357,15 +423,45 @@ def load_and_chunk_pdf(pdf_path: Path, split_cfg: SplitConfig) -> List[Chunk]:
 
     chunks: List[Chunk] = []
     chunk_id = 0
-    for d in docs:
-        page = d.metadata.get("page") if isinstance(d.metadata, dict) else None
-        parts = splitter.split_text(d.page_content)
-        for p in parts:
-            text = p.strip()
-            if not text:
-                continue
-            chunks.append(Chunk(chunk_id=chunk_id, page=page, text=text))
-            chunk_id += 1
+
+    # Prefer lazy loading to avoid parsing the entire PDF when only a range is needed
+    lazy = getattr(loader, "lazy_load", None)
+    if callable(lazy):
+        docs_iter = lazy()
+        for d in docs_iter:
+            page = d.metadata.get("page") if isinstance(d.metadata, dict) else None
+            # Filter by page range if bounds specified
+            if page is not None:
+                if start0 is not None and page < start0:
+                    continue
+                if end0 is not None and page > end0:
+                    # We've gone past the end of the requested range; stop iterating further pages
+                    break
+            parts = splitter.split_text(d.page_content)
+            for p in parts:
+                text = p.strip()
+                if not text:
+                    continue
+                chunks.append(Chunk(chunk_id=chunk_id, page=page, text=text))
+                chunk_id += 1
+    else:
+        # Fallback: load all pages (may be slower for large PDFs)
+        docs = loader.load()
+        for d in docs:
+            page = d.metadata.get("page") if isinstance(d.metadata, dict) else None
+            # Filter by page range if bounds specified
+            if page is not None:
+                if start0 is not None and page < start0:
+                    continue
+                if end0 is not None and page > end0:
+                    continue
+            parts = splitter.split_text(d.page_content)
+            for p in parts:
+                text = p.strip()
+                if not text:
+                    continue
+                chunks.append(Chunk(chunk_id=chunk_id, page=page, text=text))
+                chunk_id += 1
 
     return chunks
 
@@ -415,15 +511,33 @@ def translate_chunk(llm: ChatOpenAI, text: str, max_retries: int, backoff: float
                 SystemMessage(content=SYSTEM_PROMPT),
                 HumanMessage(content=f"Translate the following content to Russian. Return only Markdown.\n\n{text}"),
             ]
+            logger.info(f"LLM request start (attempt {attempt}/{max_retries}) | input chars: {len(text)}")
+            t0 = time.perf_counter()
             resp = llm.invoke(messages)
-            # resp is a AIMessage with .content
+            dt_s = time.perf_counter() - t0
+            # Try to log token usage if available
+            usage = None
+            try:
+                # LangChain AIMessage may have usage in response_metadata or .usage_metadata
+                meta = getattr(resp, 'response_metadata', None) or {}
+                usage = meta.get('token_usage') or getattr(resp, 'usage_metadata', None)
+            except Exception:
+                usage = None
+            if usage:
+                logger.info(f"LLM request success in {dt_s:.2f}s | usage: {usage}")
+            else:
+                logger.info(f"LLM request success in {dt_s:.2f}s")
+            # resp is an AIMessage with .content
             return str(resp.content).strip()
         except Exception as e:
+            dt_s = time.perf_counter() - t0 if 't0' in locals() else 0.0
             last_err = e
             wait = backoff * (2 ** (attempt - 1))
-            logger.warning(f"LLM call failed (attempt {attempt}/{max_retries}): {e}. Retrying in {wait:.1f}s...")
+            logger.warning(f"LLM request error after {dt_s:.2f}s (attempt {attempt}/{max_retries}): {e}. Retrying in {wait:.1f}s...")
             time.sleep(wait)
     assert last_err is not None
+    # Log final failure
+    logger.error(f"LLM request failed after {max_retries} attempts: {last_err}")
     raise last_err
 
 
@@ -469,6 +583,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--chunk-size", dest="chunk_size", type=int, help="Chunk size in characters")
     p.add_argument("--chunk-overlap", dest="chunk_overlap", type=int, help="Chunk overlap in characters")
 
+    # Page range (1-based inclusive)
+    p.add_argument("--page-start", dest="page_start", type=int, help="Start page number (1-based). If omitted and --page-end is set, translates the first N pages.")
+    p.add_argument("--page-end", dest="page_end", type=int, help="End page number (1-based, inclusive). If only this is set, it means translate the first N pages.")
+
     # Runtime & resume
     p.add_argument("--db-path", help=f"Path to SQLite state DB (default: {DEFAULT_DB_FILE})")
     res_group = p.add_mutually_exclusive_group()
@@ -507,16 +625,24 @@ def main(argv: Optional[List[str]] = None) -> int:
     # Load & split
     logger.info("Loading and chunking PDF...")
     try:
-        chunks = load_and_chunk_pdf(input_path, cfg.split)
+        chunks = load_and_chunk_pdf(input_path, cfg.split, cfg.runtime.page_start, cfg.runtime.page_end)
     except Exception as e:
         logger.exception(f"Failed to load/split PDF: {e}")
         return 3
 
     total_chunks = len(chunks)
-    logger.info(f"Prepared {total_chunks} chunks for translation.")
+    if cfg.runtime.page_start is not None or cfg.runtime.page_end is not None:
+        logger.info(f"Prepared {total_chunks} chunks for translation for selected pages (start={cfg.runtime.page_start}, end={cfg.runtime.page_end}).")
+    else:
+        logger.info(f"Prepared {total_chunks} chunks for translation.")
 
-    # Compute file hash for state
-    file_hash = file_content_sha256(input_path)
+    # Compute job id (file hash + page range) for state separation
+    base_hash = file_content_sha256(input_path)
+    if cfg.runtime.page_start is not None or cfg.runtime.page_end is not None:
+        page_spec = f"pages={cfg.runtime.page_start if cfg.runtime.page_start is not None else ''}:{cfg.runtime.page_end if cfg.runtime.page_end is not None else ''}"
+        file_hash = hashlib.sha256((base_hash + '|' + page_spec).encode('utf-8')).hexdigest()
+    else:
+        file_hash = base_hash
 
     # Prepare LLM
     if not cfg.runtime.dry_run:
@@ -533,6 +659,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     if completed_ids:
         logger.info(f"Resuming: {len(completed_ids)} chunks already completed. Will skip them.")
 
+    # Initialize progress tracking
+    processed_done = len(completed_ids)
+    progress_start_time = time.time()
+    print_progress(processed_done, total_chunks, progress_start_time)
+
     # Process chunks
     start_time = time.time()
     for ch in chunks:
@@ -548,6 +679,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             else:
                 translated = translate_chunk(llm, ch.text, cfg.runtime.max_retries, cfg.runtime.retry_backoff)
             db.upsert_chunk(file_hash, ch.chunk_id, total_chunks, ch.page, "done", translated)
+            # Update progress after successful translation
+            processed_done += 1
+            print_progress(processed_done, total_chunks, progress_start_time)
         except Exception as e:
             logger.exception(f"Failed translating chunk {ch.chunk_id}: {e}")
             db.upsert_chunk(file_hash, ch.chunk_id, total_chunks, ch.page, "error", None)
@@ -564,6 +698,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         except Exception as e:
             logger.warning(f"Failed to write interim output: {e}")
 
+    # Finish progress bar line
+    try:
+        sys.stdout.write("\n")
+        sys.stdout.flush()
+    except Exception:
+        pass
     elapsed = time.time() - start_time
 
     # Final assembly

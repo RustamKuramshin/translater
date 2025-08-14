@@ -33,6 +33,9 @@ runtime:
   retry_backoff: 2.0
   # Dry-run: perform loading and chunking, but skip LLM calls
   dry_run: false
+  # Page range selection (1-based inclusive). If only page_end is set, translates first N pages
+  page_start: null
+  page_end: null
 
 # Notes:
 # - Set your OpenAI API key in the environment: export OPENAI_API_KEY=... 
