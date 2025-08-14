@@ -334,3 +334,4 @@ cython_debug/
 *.pdf
 *.sqlite3
 *.md
+!README.md
