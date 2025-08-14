@@ -1,0 +1,39 @@
+# Example configuration for the PDF translator
+# Save this as config.yaml (or .json with similar structure) and pass with --config config.yaml
+# CLI arguments always override values from this file.
+
+llm:
+  # OpenAI model name. Choose according to your access and needs.
+  model: gpt-4o-2024-11-20
+  # Sampling temperature (lower = more deterministic)
+  temperature: 0.5
+  # Let the API decide by default; set to an int to limit output tokens
+  max_tokens: null
+  top_p: null
+  frequency_penalty: null
+  presence_penalty: null
+  # Request timeout in seconds
+  request_timeout: 120
+
+split:
+  # Character-based chunk size for the RecursiveCharacterTextSplitter
+  chunk_size: 2000
+  # Overlap (chars) between adjacent chunks to reduce sentence split artifacts
+  chunk_overlap: 200
+
+runtime:
+  # Path to output Markdown. If null, tool uses <input>.ru.md
+  output: null
+  # Path to SQLite DB used for resumable progress. Can be a relative path.
+  db_path: ./.translator_state.sqlite3
+  # Whether to resume from existing progress
+  resume: true
+  # Retry policy for LLM calls
+  max_retries: 3
+  retry_backoff: 2.0
+  # Dry-run: perform loading and chunking, but skip LLM calls
+  dry_run: false
+
+# Notes:
+# - Set your OpenAI API key in the environment: export OPENAI_API_KEY=... 
+# - You can also provide a JSON config with the same structure.

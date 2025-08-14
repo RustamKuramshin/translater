@@ -331,3 +331,5 @@ cython_debug/
 #.idea/
 
 .idea
+*.pdf
+*.sqlite3

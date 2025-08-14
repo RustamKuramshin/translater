@@ -38,7 +38,7 @@ import sqlite3
 import sys
 import textwrap
 import time
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -98,9 +98,9 @@ class RuntimeConfig:
 
 @dataclass
 class AppConfig:
-    llm: LLMConfig = LLMConfig()
-    split: SplitConfig = SplitConfig()
-    runtime: RuntimeConfig = RuntimeConfig()
+    llm: LLMConfig = field(default_factory=LLMConfig)
+    split: SplitConfig = field(default_factory=SplitConfig)
+    runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
 
     @staticmethod
     def from_files_and_args(config_path: Optional[str], args: argparse.Namespace) -> "AppConfig":
@@ -162,15 +162,79 @@ def setup_logging(level: int = logging.INFO) -> None:
 
 # ---------------------- Utilities ----------------------
 
+def _parse_minimal_yaml(text: str) -> Dict[str, Any]:
+    """
+    Minimal YAML parser supporting a subset sufficient for our config files:
+    - Nested mappings by indentation (spaces only)
+    - key: value pairs with scalars (str, int, float, bool, null)
+    - key: on a line starts a nested mapping
+    - Comments starting with # and blank lines are ignored
+    - No sequences/lists support
+    This is a fallback used only when PyYAML is not installed.
+    """
+    def parse_scalar(val: str):
+        v = val.strip()
+        if v == "" or v.lower() == "null":
+            return None
+        if v.lower() in ("true", "false"):
+            return v.lower() == "true"
+        # Try int/float
+        try:
+            if v.isdigit() or (v.startswith("-") and v[1:].isdigit()):
+                return int(v)
+            return float(v)
+        except Exception:
+            pass
+        # Strip quotes if present
+        if (v.startswith("'") and v.endswith("'")) or (v.startswith('"') and v.endswith('"')):
+            return v[1:-1]
+        return v
+
+    lines = text.splitlines()
+    root: Dict[str, Any] = {}
+    stack: List[Tuple[int, Dict[str, Any]]] = [(0, root)]
+
+    for raw in lines:
+        # Remove comments
+        line = raw.split('#', 1)[0].rstrip('\n')
+        if not line.strip():
+            continue
+        indent = len(line) - len(line.lstrip(' '))
+        # Ensure spaces only
+        if '\t' in line:
+            raise ValueError("Tabs are not supported in YAML indentation")
+        # Adjust stack according to indentation
+        while stack and indent < stack[-1][0]:
+            stack.pop()
+        if not stack:
+            raise ValueError("Invalid indentation structure in YAML")
+        current = stack[-1][1]
+        stripped = line.strip()
+        if stripped.endswith(":"):
+            key = stripped[:-1].strip()
+            new_map: Dict[str, Any] = {}
+            current[key] = new_map
+            stack.append((indent + 2, new_map))
+        else:
+            if ":" not in stripped:
+                raise ValueError(f"Invalid line in YAML: {raw}")
+            key, val = stripped.split(":", 1)
+            key = key.strip()
+            current[key] = parse_scalar(val)
+    return root
+
+
 def load_config_file(path: Path) -> Dict[str, Any]:
     if not path.exists():
         raise FileNotFoundError(f"Config file not found: {path}")
     try:
         if path.suffix.lower() in {".yaml", ".yml"}:
-            if yaml is None:
-                raise RuntimeError("PyYAML is not installed. Install pyyaml or provide a JSON config file.")
             with path.open("r", encoding="utf-8") as f:
-                return yaml.safe_load(f) or {}
+                text = f.read()
+            if yaml is not None:
+                return yaml.safe_load(text) or {}
+            # Fallback minimal parser
+            return _parse_minimal_yaml(text)
         elif path.suffix.lower() == ".json":
             with path.open("r", encoding="utf-8") as f:
                 return json.load(f)
